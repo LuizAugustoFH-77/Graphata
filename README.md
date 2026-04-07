@@ -19,6 +19,7 @@ Crie, edite, simule, converta e minimize autômatos diretamente no canvas. Tudo 
 - **Sugestão inteligente de strings** — BFS no grafo gera exemplos aceitos e rejeitados automaticamente, com botão "Testar" que envia direto pra simulação.
 - **Import / Export JSON** — formato leve documentado em [`FORMATO_JSON.md`](FORMATO_JSON.md).
 - **Undo (Ctrl+Z)** — histórico de até 30 snapshots.
+- **Curvas de aresta manuais** — clique e arraste qualquer aresta para curvá-la do jeito que quiser, melhorando a organização visual. Solte perto do segmento original para resetar.
 
 ## Atalhos rápidos
 
@@ -31,6 +32,8 @@ Crie, edite, simule, converta e minimize autômatos diretamente no canvas. Tudo 
 | Apagar estado | Ctrl + botão direito no nó |
 | Selecionar aresta | Botão direito na aresta |
 | Apagar aresta | Selecione + Delete |
+| Curvar aresta manual | Clique e arraste na aresta |
+| Resetar curva | Arraste até o segmento e solte, ou Ctrl+Z |
 | Zoom | Scroll do mouse |
 | Pan | Clique do meio (ou botão esquerdo no vazio) |
 | Desfazer | Ctrl+Z |

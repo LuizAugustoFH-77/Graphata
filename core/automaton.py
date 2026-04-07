@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import re
 from typing import Set, Dict, List, Optional
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class Automaton:
         if name in self.states:
             del self.states[name]
         self.transitions = [t for t in self.transitions if t.source != name and t.target != name]
+        self.alphabet = {t.symbol for t in self.transitions if t.symbol not in ("", "Îµ")}
 
     def add_transition(self, source: str, symbol: str, target: str):
         if source in self.states and target in self.states:
@@ -67,6 +69,19 @@ class Automaton:
         self.states.clear()
         self.transitions.clear()
         self.alphabet.clear()
+
+    def next_state_name(self, prefix: str = "q") -> str:
+        """Retorna o menor nome sequencial livre no formato <prefix><n>."""
+        pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+        used_indexes = {
+            int(match.group(1))
+            for name in self.states
+            if (match := pattern.match(name))
+        }
+        next_index = 0
+        while next_index in used_indexes:
+            next_index += 1
+        return f"{prefix}{next_index}"
 
     def to_dict(self) -> dict:
         return {

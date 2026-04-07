@@ -36,6 +36,14 @@ class AutomatonCanvas(tk.Canvas):
         # Aresta selecionada para deleção: (source, target, symbol)
         self.selected_edge = None
 
+        # Pontos customizados para curvas de arestas: {(source, target): (dx, dy)}
+        # dx/dy = offset perpendicular ao segmento, salvo em canvas coords
+        self.edge_control_points = {}
+        self.edge_tag_to_pair = {}
+
+        # Drag de ponto de controle de aresta
+        self.edge_drag_data = {"active": False, "pair": None, "item": None}
+
         # Histórico para Ctrl+Z
         self._history = []
 
@@ -64,24 +72,27 @@ class AutomatonCanvas(tk.Canvas):
     # ─── Histórico ──────────────────────────────────────────────────────────
 
     def _snapshot(self):
-        """Salva o estado atual do autômato e posições no histórico."""
+        """Salva o estado atual do autômato, posições e control points no histórico."""
         snap_aut = self.automaton.to_dict()
         snap_pos = {name: (nd["x"], nd["y"]) for name, nd in self.nodes.items()}
-        self._history.append((snap_aut, snap_pos))
+        snap_edges = dict(self.edge_control_points)
+        self._history.append((snap_aut, snap_pos, snap_edges))
         if len(self._history) > 30:
             self._history.pop(0)
 
     def undo(self, event=None):
         if not self._history:
             return
-        snap_aut, snap_pos = self._history.pop()
+        snap_aut, snap_pos, snap_edges = self._history.pop()
         restored = Automaton.from_dict(snap_aut)
         self.automaton.__dict__.update(restored.__dict__)
+        self.edge_control_points = snap_edges
         self.clear_ui(reset_counter=False)
         for name, (x, y) in snap_pos.items():
             if name in self.automaton.states:
                 self.draw_node(name, x, y)
         self.refresh_edges()
+        self._sync_state_counter()
         if self.on_change:
             self.on_change()
 
@@ -91,8 +102,11 @@ class AutomatonCanvas(tk.Canvas):
         self.delete("all")
         self.nodes.clear()
         self.selected_edge = None
+        self.edge_drag_data = {"active": False, "pair": None, "item": None}
+        self.edge_tag_to_pair.clear()
         if reset_counter:
             self.state_counter = 0
+            self.edge_control_points.clear()
 
     def _scaled_node_radius(self):
         return max(10, self.radius * self._zoom)
@@ -116,6 +130,7 @@ class AutomatonCanvas(tk.Canvas):
         selected = self.selected_edge if preserve_selection else None
         self.delete("all")
         self.nodes.clear()
+        self.edge_tag_to_pair.clear()
 
         for name in self.automaton.states.keys():
             x, y = positions.get(name, (100, 100))
@@ -139,12 +154,7 @@ class AutomatonCanvas(tk.Canvas):
             y = cy + radius * math.sin(i * angle_step - math.pi / 2)
             self.draw_node(name, x, y)
         self.refresh_edges()
-        max_idx = -1
-        for name in self.automaton.states.keys():
-            num_part = ''.join(filter(str.isdigit, name))
-            if num_part:
-                max_idx = max(max_idx, int(num_part))
-        self.state_counter = max_idx + 1 if max_idx >= 0 else n
+        self._sync_state_counter()
         if self.on_change:
             self.on_change()
 
@@ -209,6 +219,10 @@ class AutomatonCanvas(tk.Canvas):
                 x += self.radius * 3
         return x, y
 
+    def _sync_state_counter(self):
+        next_name = self.automaton.next_state_name()
+        self.state_counter = int(next_name[1:]) if next_name.startswith("q") and next_name[1:].isdigit() else 0
+
     # ─── Nós ────────────────────────────────────────────────────────────────
 
     def on_double_click(self, event):
@@ -221,10 +235,10 @@ class AutomatonCanvas(tk.Canvas):
                 return
         # Clique no vazio → criar estado
         x, y = self._safe_pos(event.x, event.y)
-        name = f"q{self.state_counter}"
-        self.state_counter += 1
+        name = self.automaton.next_state_name()
         self._snapshot()
         self.automaton.add_state(name)
+        self._sync_state_counter()
         if len(self.automaton.states) == 1:
             self.automaton.set_initial(name)
         self.draw_node(name, x, y)
@@ -252,6 +266,7 @@ class AutomatonCanvas(tk.Canvas):
         # Atualiza canvas preservando a posição do estado renomeado
         nd = self.nodes.pop(old_name)
         self.nodes[new_name] = nd
+        self._sync_state_counter()
         self._redraw_scene()
         self._notify()
 
@@ -336,7 +351,7 @@ class AutomatonCanvas(tk.Canvas):
             if "node" in tags or "node_text" in tags:
                 self._show_context_menu(event, tags[1])
                 return
-            if "edge" in tags or "edge_text" in tags:
+            if {"edge", "edge_text", "edge_label_bg", "edge_label_callout"} & set(tags):
                 # Selecionar aresta
                 self._select_edge_at(event.x, event.y)
 
@@ -375,10 +390,15 @@ class AutomatonCanvas(tk.Canvas):
     def _delete_state(self, name):
         self._snapshot()
         self.automaton.remove_state(name)
-        self.delete(self.nodes[name]["item"])
-        self.delete(self.nodes[name]["text"])
-        self.delete(f"init_arrow_{name}")
+        if self.selected_edge and name in (self.selected_edge.source, self.selected_edge.target):
+            self.selected_edge = None
+        # Limpar control points das arestas conectadas
+        pairs_to_remove = [p for p in self.edge_control_points if name in p]
+        for p in pairs_to_remove:
+            del self.edge_control_points[p]
+        self.delete(name)
         del self.nodes[name]
+        self._sync_state_counter()
         self.refresh_edges()
         self._notify()
 
@@ -394,6 +414,13 @@ class AutomatonCanvas(tk.Canvas):
 
     def _select_edge_at(self, x, y):
         """Identifica a transição mais próxima do clique e a seleciona."""
+        current_pair = self._edge_pair_from_current_item()
+        if current_pair:
+            for t in self.automaton.transitions:
+                if (t.source, t.target) == current_pair:
+                    self.selected_edge = t
+                    self.refresh_edges()
+                    return
         best = None
         best_dist = 18  # pixels de tolerância
         for t in self.automaton.transitions:
@@ -416,6 +443,11 @@ class AutomatonCanvas(tk.Canvas):
             t = self.selected_edge
             self.automaton.transitions = [tr for tr in self.automaton.transitions if tr != t]
             self.automaton.alphabet = {tr.symbol for tr in self.automaton.transitions if tr.symbol not in ("", "ε")}
+            # Limpar control point se for a única transição desse par
+            pair = (t.source, t.target)
+            has_remaining = any(tr.source == t.source and tr.target == t.target for tr in self.automaton.transitions)
+            if not has_remaining and pair in self.edge_control_points:
+                del self.edge_control_points[pair]
             self.selected_edge = None
             self.refresh_edges()
             self._notify()
@@ -436,14 +468,17 @@ class AutomatonCanvas(tk.Canvas):
                     self.drag_data["item"] = name
                     self.drag_data["x"] = event.x
                     self.drag_data["y"] = event.y
-            elif "edge" in tags or "edge_text" in tags:
+            elif {"edge", "edge_text", "edge_label_bg", "edge_label_callout"} & set(tags):
                 self._select_edge_at(event.x, event.y)
+                self.on_edge_drag_start(event)
         else:
             # Inicia pan com botão esquerdo se clicar no vazio
             self.on_pan_start(event)
 
     def on_drag(self, event):
-        if self.link_start:
+        if self.edge_drag_data["active"]:
+            self.on_edge_drag_motion(event)
+        elif self.link_start:
             self.delete("temp_line")
             nx = self.nodes[self.link_start]["x"]
             ny = self.nodes[self.link_start]["y"]
@@ -457,12 +492,16 @@ class AutomatonCanvas(tk.Canvas):
             self.nodes[name]["y"] = event.y
             self.drag_data["x"] = event.x
             self.drag_data["y"] = event.y
+            # Mover control points das arestas conectadas
+            self._adjust_edge_control_points(name, dx, dy)
             self.refresh_edges()
         elif self.pan_data["active"]:
             # Executa pan se iniciado pelo botão esquerdo
             self.on_pan_drag(event)
 
     def on_drop(self, event):
+        if self.edge_drag_data["active"]:
+            self.on_edge_drag_release(event)
         if self.link_start:
             self.delete("temp_line")
             item = self.find_closest(event.x, event.y)
@@ -495,6 +534,9 @@ class AutomatonCanvas(tk.Canvas):
             for name in self.nodes:
                 self.nodes[name]["x"] += dx
                 self.nodes[name]["y"] += dy
+            # Mover também os control points
+            for pair, (cpx, cpy) in self.edge_control_points.items():
+                self.edge_control_points[pair] = (cpx + dx, cpy + dy)
             self.pan_data["x"] = event.x
             self.pan_data["y"] = event.y
             self.config(cursor="fleur")
@@ -514,6 +556,11 @@ class AutomatonCanvas(tk.Canvas):
             ny = (self.nodes[name]["y"] - cy) * factor + cy
             self.nodes[name]["x"] = nx
             self.nodes[name]["y"] = ny
+        # Escalar também os control points de arestas customizadas
+        for pair, (cpx, cpy) in self.edge_control_points.items():
+            ncx = (cpx - cx) * factor + cx
+            ncy = (cpy - cy) * factor + cy
+            self.edge_control_points[pair] = (ncx, ncy)
         self._redraw_scene()
 
     # ─── Arestas ────────────────────────────────────────────────────────────
@@ -523,6 +570,7 @@ class AutomatonCanvas(tk.Canvas):
         self.delete("edge_text")
         self.delete("edge_label_bg")
         self.delete("edge_label_callout")
+        self.edge_tag_to_pair.clear()
         r = self._scaled_node_radius()
 
         # Agrupar transições por par
@@ -538,9 +586,11 @@ class AutomatonCanvas(tk.Canvas):
         pair_order = self._pair_orderings(edge_groups)
         hub_targets, hub_sources = self._hub_nodes(edge_groups)
 
-        for (source, target), symbols in edge_groups.items():
+        for idx, ((source, target), symbols) in enumerate(edge_groups.items()):
             if source not in self.nodes or target not in self.nodes:
                 continue
+            pair_tag = f"edge_pair_{idx}"
+            self.edge_tag_to_pair[pair_tag] = (source, target)
             sx, sy = self.nodes[source]["x"], self.nodes[source]["y"]
             tx, ty = self.nodes[target]["x"], self.nodes[target]["y"]
             symbols_str = ", ".join(symbols)
@@ -555,7 +605,7 @@ class AutomatonCanvas(tk.Canvas):
                 loop_w = max(14, int(15 * max(0.9, self._zoom)))
                 loop_h = max(20, int(30 * max(0.9, self._zoom)))
                 self.create_oval(sx - loop_w, sy - r - loop_h, sx + loop_w, sy - r,
-                                 outline=color, width=2, tags="edge")
+                                 outline=color, width=2, tags=("edge", pair_tag))
                 label_y = sy - r - loop_h - max(12, int(14 * self._zoom))
                 self._draw_edge_label(
                     sx,
@@ -563,6 +613,7 @@ class AutomatonCanvas(tk.Canvas):
                     symbols_str,
                     color,
                     self._edge_font(),
+                    pair_tag=pair_tag,
                 )
             else:
                 dx = tx - sx
@@ -580,12 +631,25 @@ class AutomatonCanvas(tk.Canvas):
                 has_reverse = (target, source) in edge_groups
                 edge_font = self._edge_font()
                 arrowshape = self._edge_arrowshape()
-                if dense_mode and target in hub_targets:
+                has_cp = (source, target) in self.edge_control_points
+                if has_cp:
+                    # Controle manual do usuário sobrepõe qualquer modo automático
+                    cp_x, cp_y = self.edge_control_points[(source, target)]
+                    self.create_line(start_x, start_y, cp_x, cp_y, end_x, end_y,
+                                     smooth=True, arrow=tk.LAST, fill=color, width=2,
+                                     arrowshape=arrowshape, tags=("edge", pair_tag))
+                    lane2 = pair_order.get((source, target), 0)
+                    label_x2, label_y2, anchor_x2, anchor_y2 = self._segment_label_position(
+                        start_x, start_y, cp_x, cp_y, lane2, t=0.42, offset=18
+                    )
+                    self._draw_edge_label(label_x2, label_y2, symbols_str, color, edge_font, anchor_x2, anchor_y2, pair_tag)
+                elif dense_mode and target in hub_targets:
                     self._draw_hub_edge(
                         source, target,
                         start_x, start_y, end_x, end_y,
                         symbols_str, color, edge_font,
                         pair_order.get((source, target), 0),
+                        pair_tag=pair_tag,
                     )
                 elif dense_mode and source in hub_sources:
                     self._draw_hub_edge(
@@ -594,6 +658,7 @@ class AutomatonCanvas(tk.Canvas):
                         symbols_str, color, edge_font,
                         pair_order.get((source, target), 0),
                         source_is_hub=True,
+                        pair_tag=pair_tag,
                     )
                 elif has_reverse:
                     px, py = -ny, nx
@@ -611,12 +676,12 @@ class AutomatonCanvas(tk.Canvas):
                                 end_y = ty + (vec[1] / d) * r
                     self.create_line(start_x, start_y, mid_x, mid_y, end_x, end_y,
                                      smooth=True, arrow=tk.LAST, fill=color, width=2,
-                                     arrowshape=arrowshape, tags="edge")
+                                     arrowshape=arrowshape, tags=("edge", pair_tag))
                     lane = pair_order.get((source, target), 0)
                     label_x, label_y, anchor_x, anchor_y = self._segment_label_position(
                         start_x, start_y, mid_x, mid_y, lane, t=0.42, offset=20
                     )
-                    self._draw_edge_label(label_x, label_y, symbols_str, color, edge_font, anchor_x, anchor_y)
+                    self._draw_edge_label(label_x, label_y, symbols_str, color, edge_font, anchor_x, anchor_y, pair_tag)
                 elif dense_mode and dist > 180:
                     px, py = -ny, nx
                     offset = min(90, 22 + dist * 0.12)
@@ -626,22 +691,22 @@ class AutomatonCanvas(tk.Canvas):
                     self.create_line(
                         start_x, start_y, mid_x, mid_y, end_x, end_y,
                         smooth=True, arrow=tk.LAST, fill=color, width=2,
-                        arrowshape=arrowshape, tags="edge"
+                        arrowshape=arrowshape, tags=("edge", pair_tag)
                     )
                     lane = pair_order.get((source, target), 0)
                     label_x, label_y, anchor_x, anchor_y = self._segment_label_position(
                         start_x, start_y, mid_x, mid_y, lane * direction, t=0.42, offset=20
                     )
-                    self._draw_edge_label(label_x, label_y, symbols_str, color, edge_font, anchor_x, anchor_y)
+                    self._draw_edge_label(label_x, label_y, symbols_str, color, edge_font, anchor_x, anchor_y, pair_tag)
                 else:
                     self.create_line(start_x, start_y, end_x, end_y,
                                      arrow=tk.LAST, fill=color, width=2,
-                                     arrowshape=arrowshape, tags="edge")
+                                     arrowshape=arrowshape, tags=("edge", pair_tag))
                     lane = pair_order.get((source, target), 0)
                     label_x, label_y, anchor_x, anchor_y = self._segment_label_position(
                         start_x, start_y, end_x, end_y, lane, t=0.34, offset=20
                     )
-                    self._draw_edge_label(label_x, label_y, symbols_str, color, edge_font, anchor_x, anchor_y)
+                    self._draw_edge_label(label_x, label_y, symbols_str, color, edge_font, anchor_x, anchor_y, pair_tag)
 
         self.tag_lower("edge")
         self.tag_raise("edge_label_bg")
@@ -683,7 +748,7 @@ class AutomatonCanvas(tk.Canvas):
         hub_sources = {name for name, count in outgoing.items() if count >= limit}
         return hub_targets, hub_sources
 
-    def _draw_hub_edge(self, source, target, start_x, start_y, end_x, end_y, symbols_str, color, edge_font, lane_index, source_is_hub=False):
+    def _draw_hub_edge(self, source, target, start_x, start_y, end_x, end_y, symbols_str, color, edge_font, lane_index, source_is_hub=False, pair_tag=None):
         width = int(self.winfo_width()) or 700
         height = int(self.winfo_height()) or 500
         spread = max(7, int(9 * self._zoom))
@@ -716,9 +781,9 @@ class AutomatonCanvas(tk.Canvas):
             fill=color,
             width=2,
             arrowshape=self._edge_arrowshape(),
-            tags="edge",
+            tags=("edge", pair_tag) if pair_tag else "edge",
         )
-        self._draw_edge_label(label_x, label_y, symbols_str, color, edge_font, anchor_x, anchor_y)
+        self._draw_edge_label(label_x, label_y, symbols_str, color, edge_font, anchor_x, anchor_y, pair_tag)
 
     def _hub_port(self, name, lane_index, side="right"):
         nd = self.nodes[name]
@@ -760,14 +825,15 @@ class AutomatonCanvas(tk.Canvas):
         label_y = py + ny * normal_offset + (dy / dist) * along_offset
         return label_x, label_y, px, py
 
-    def _draw_edge_label(self, x, y, text, color, font, anchor_x=None, anchor_y=None):
+    def _draw_edge_label(self, x, y, text, color, font, anchor_x=None, anchor_y=None, pair_tag=None):
+        text_tags = ("edge_text", pair_tag) if pair_tag else "edge_text"
         text_item = self.create_text(
             x,
             y,
             text=text,
             fill="#f8fafc",
             font=font,
-            tags="edge_text",
+            tags=text_tags,
         )
         x1, y1, x2, y2 = self.bbox(text_item)
         pad_x = max(5, int(6 * self._zoom))
@@ -780,7 +846,7 @@ class AutomatonCanvas(tk.Canvas):
             fill="#111827",
             outline=color,
             width=max(1, int(1.2 * max(0.9, self._zoom))),
-            tags="edge_label_bg",
+            tags=("edge_label_bg", pair_tag) if pair_tag else "edge_label_bg",
         )
         self.tag_raise(text_item, bg)
 
@@ -799,5 +865,187 @@ class AutomatonCanvas(tk.Canvas):
                     fill=color,
                     width=max(1, int(1.1 * max(0.9, self._zoom))),
                     dash=(3, 2),
-                    tags="edge_label_callout",
+                    tags=("edge_label_callout", pair_tag) if pair_tag else "edge_label_callout",
                 )
+
+    # Aresta customizada (arraste direto) ────────────────────────────────
+
+    def on_edge_drag_start(self, event):
+        """Inicia o arraste de uma aresta — cria control point se não existir."""
+        pair = self._edge_pair_from_current_item() or self._find_edge_at(event.x, event.y)
+        if pair is None:
+            return
+        self._snapshot()
+        self.edge_drag_data = {"active": True, "pair": pair, "item": None}
+        # Se ainda não tem control point, cria no ponto médio perpendicular
+        if pair not in self.edge_control_points:
+            sx, sy = self.nodes[pair[0]]["x"], self.nodes[pair[0]]["y"]
+            tx, ty = self.nodes[pair[1]]["x"], self.nodes[pair[1]]["y"]
+            mx, my = (sx + tx) / 2, (sy + ty) / 2
+            dx, dy = tx - sx, ty - sy
+            dist = math.hypot(dx, dy)
+            if dist > 0:
+                # offset perpendicular: (-dy, dx)
+                px, py = -dy / dist, dx / dist
+                offset = max(30, int(50 * self._zoom))
+                cp_x = mx + px * offset
+                cp_y = my + py * offset
+                self.edge_control_points[pair] = (cp_x, cp_y)
+        self.refresh_edges()
+        self.config(cursor="hand2")
+
+    def on_edge_drag_motion(self, event):
+        """Mover o ponto de controle enquanto arrasta."""
+        if not self.edge_drag_data["active"]:
+            return
+        pair = self.edge_drag_data["pair"]
+        if pair is None:
+            return
+        # Atualizar o control point para a posição do mouse
+        self.edge_control_points[pair] = (event.x, event.y)
+        self.refresh_edges()
+
+    def on_edge_drag_release(self, event):
+        """Finaliza o arraste — se arrastou pouco, reseta."""
+        if not self.edge_drag_data["active"]:
+            return
+        pair = self.edge_drag_data["pair"]
+        # Se o control point ficou muito perto do segmento, remove
+        if pair and pair in self.edge_control_points:
+            sx, sy = self.nodes[pair[0]]["x"], self.nodes[pair[0]]["y"]
+            tx, ty = self.nodes[pair[1]]["x"], self.nodes[pair[1]]["y"]
+            cp_x, cp_y = self.edge_control_points[pair]
+            dist_to_segment = self._distance_to_segment(sx, sy, tx, ty, cp_x, cp_y)
+            if dist_to_segment < 10:
+                del self.edge_control_points[pair]
+        self.edge_drag_data = {"active": False, "pair": None, "item": None}
+        self.config(cursor="")
+        self.refresh_edges()
+        self._notify()
+
+    def _edge_pair_from_current_item(self):
+        item = self.find_withtag("current")
+        if not item:
+            return None
+        for tag in self.gettags(item[0]):
+            pair = self.edge_tag_to_pair.get(tag)
+            if pair:
+                return pair
+        return None
+
+    def _find_edge_at(self, x, y):
+        """Encontra o par (source, target) da aresta mais próxima do ponto."""
+        best = None
+        best_dist = 22  # tolerância em pixels
+        seen_pairs = set()
+        for t in self.automaton.transitions:
+            pair = (t.source, t.target)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            if t.source not in self.nodes or t.target not in self.nodes:
+                continue
+            sx, sy = self.nodes[t.source]["x"], self.nodes[t.source]["y"]
+            tx, ty = self.nodes[t.target]["x"], self.nodes[t.target]["y"]
+            if pair[0] == pair[1]:
+                r = self._scaled_node_radius()
+                loop_w = max(14, int(15 * max(0.9, self._zoom)))
+                loop_h = max(20, int(30 * max(0.9, self._zoom)))
+                segments = [
+                    (sx - loop_w, sy - r - loop_h, sx + loop_w, sy - r - loop_h),
+                    (sx - loop_w, sy - r - loop_h, sx - loop_w, sy - r),
+                    (sx + loop_w, sy - r - loop_h, sx + loop_w, sy - r),
+                ]
+                d = min(self._distance_to_segment(x1, y1, x2, y2, x, y) for x1, y1, x2, y2 in segments)
+            elif pair in self.edge_control_points:
+                cp_x, cp_y = self.edge_control_points[pair]
+                d = min(
+                    self._distance_to_segment(sx, sy, cp_x, cp_y, x, y),
+                    self._distance_to_segment(cp_x, cp_y, tx, ty, x, y),
+                )
+            else:
+                d = self._distance_to_segment(sx, sy, tx, ty, x, y)
+            if d < best_dist:
+                best_dist = d
+                best = pair
+        return best
+
+    def _distance_to_segment(self, x1, y1, x2, y2, px, py):
+        """Distância de um ponto px,py ao segmento x1,y1-x2,y2."""
+        dx, dy = x2 - x1, y2 - y1
+        length_sq = dx*dx + dy*dy
+        if length_sq == 0:
+            return math.hypot(px - x1, py - y1)
+        t = max(0, min(1, ((px - x1)*dx + (py - y1)*dy) / length_sq))
+        proj_x = x1 + t * dx
+        proj_y = y1 + t * dy
+        return math.hypot(px - proj_x, py - proj_y)
+
+    def _adjust_edge_control_points(self, moved_name, dx, dy):
+        """Ajusta os control points quando um nó é arrastado.
+        Se só uma ponta moveu, o control point segue a posição relativa.
+        Se as duas pontas moveram (pan do canvas), o control point segue junto.
+        """
+        for pair, (cpx, cpy) in self.edge_control_points.items():
+            if pair[0] == moved_name and pair[1] == moved_name:
+                # self-loop: control point move junto
+                self.edge_control_points[pair] = (cpx + dx, cpy + dy)
+            elif pair[0] == moved_name:
+                # só a origem moveu — ajusta proporcionalmente
+                if pair[1] in self.nodes:
+                    old_sx = self.nodes[pair[0]]["x"] - dx
+                    old_sy = self.nodes[pair[0]]["y"] - dy
+                    sx, sy = self.nodes[pair[0]]["x"], self.nodes[pair[0]]["y"]
+                    tx, ty = self.nodes[pair[1]]["x"], self.nodes[pair[1]]["y"]
+                    # recalcular o control point relativo ao novo segmento
+                    # mantém a mesma fração perpendicular
+                    old_dx = tx - old_sx
+                    old_dy = ty - old_sy
+                    old_dist = math.hypot(old_dx, old_dy)
+                    new_dx = tx - sx
+                    new_dy = ty - sy
+                    new_dist = math.hypot(new_dx, new_dy)
+                    if old_dist > 0 and new_dist > 0:
+                        # fração t do proj no segmento antigo
+                        t = max(0, min(1, ((cpx - old_sx)*old_dx + (cpy - old_sy)*old_dy) / (old_dist*old_dist)))
+                        new_proj_x = sx + t * new_dx
+                        new_proj_y = sy + t * new_dy
+                        # distância perpendicular
+                        old_nx, old_ny = -old_dy/old_dist, old_dx/old_dist
+                        perp_dist = (cpx - old_sx)*old_nx + (cpy - old_sy)*old_ny
+                        new_nx, new_ny = -new_dy/new_dist, new_dx/new_dist
+                        new_cpx = new_proj_x + new_nx * perp_dist
+                        new_cpy = new_proj_y + new_ny * perp_dist
+                        self.edge_control_points[pair] = (new_cpx, new_cpy)
+            elif pair[1] == moved_name:
+                # só o destino moveu — mesma lógica
+                if pair[0] in self.nodes:
+                    old_tx = self.nodes[pair[1]]["x"] - dx
+                    old_ty = self.nodes[pair[1]]["y"] - dy
+                    sx, sy = self.nodes[pair[0]]["x"], self.nodes[pair[0]]["y"]
+                    tx, ty = self.nodes[pair[1]]["x"], self.nodes[pair[1]]["y"]
+                    old_dx = old_tx - sx
+                    old_dy = old_ty - sy
+                    old_dist = math.hypot(old_dx, old_dy)
+                    new_dx = tx - sx
+                    new_dy = ty - sy
+                    new_dist = math.hypot(new_dx, new_dy)
+                    if old_dist > 0 and new_dist > 0:
+                        t = max(0, min(1, ((cpx - sx)*old_dx + (cpy - sy)*old_dy) / (old_dist*old_dist)))
+                        new_proj_x = sx + t * new_dx
+                        new_proj_y = sy + t * new_dy
+                        old_nx, old_ny = -old_dy/old_dist, old_dx/old_dist
+                        perp_dist = (cpx - sx)*old_nx + (cpy - sy)*old_ny
+                        new_nx, new_ny = -new_dy/new_dist, new_dx/new_dist
+                        new_cpx = new_proj_x + new_nx * perp_dist
+                        new_cpy = new_proj_y + new_ny * perp_dist
+                        self.edge_control_points[pair] = (new_cpx, new_cpy)
+
+    def reset_edge_curve(self, source, target):
+        """Reseta uma aresta customizada pra curva automática."""
+        pair = (source, target)
+        if pair in self.edge_control_points:
+            self._snapshot()
+            del self.edge_control_points[pair]
+            self.refresh_edges()
+            self._notify()
