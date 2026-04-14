@@ -1,55 +1,89 @@
-# Formato de Importação e Exportação JSON
+# Formato de Importação e Exportação JSON do Graphata
 
-Este simulador permite a importação e exportação de autômatos em um formato leve estruturado em JSON para facilitar o armazenamento e intercâmbio dos modelos com outras plataformas.
+O Graphata utiliza um formato leve e estruturado em JSON para exportação e importação de autômatos, visando facilitar o armazenamento, compartilhamento e a interoperabilidade com outras ferramentas acadêmicas ou de simulação.
 
-O documento base é um objeto JSON que contém três atributos raiz: `type`, `states` e `transitions`.
+O arquivo JSON define exclusivamente as propriedades lógicas do autômato (estados, transições e classificação), separando totalmente os dados do modelo da sua representação visual.
 
-## 📌 Estrutura do Arquivo
+---
+
+## 📌 Estrutura Base do Arquivo
+
+O documento raiz deve ser um objeto JSON contendo três propriedades principais obrigatórias:
+* `type`: Classificação do autômato.
+* `states`: Definição de todos os estados (nós).
+* `transitions`: Definição da função de transição (arestas).
+
+### Exemplo Completo de um Arquivo `.json`
 
 ```json
 {
-    "type": "AFD",
-    "states": [
-        {
-            "name": "q0",
-            "is_initial": true,
-            "is_final": false
-        },
-        {
-            "name": "q1",
-            "is_initial": false,
-            "is_final": true
-        }
-    ],
-    "transitions": [
-        {
-            "source": "q0",
-            "symbol": "a",
-            "target": "q1"
-        },
-        {
-            "source": "q1",
-            "symbol": "b",
-            "target": "q1"
-        }
-    ]
+  "type": "AFD",
+  "states": [
+    {
+      "name": "q0",
+      "is_initial": true,
+      "is_final": false
+    },
+    {
+      "name": "q1",
+      "is_initial": false,
+      "is_final": true
+    }
+  ],
+  "transitions": [
+    {
+      "source": "q0",
+      "symbol": "a",
+      "target": "q1"
+    },
+    {
+      "source": "q0",
+      "symbol": "b",
+      "target": "q0"
+    },
+    {
+      "source": "q1",
+      "symbol": "a",
+      "target": "q1"
+    },
+    {
+      "source": "q1",
+      "symbol": "b",
+      "target": "q0"
+    }
+  ]
 }
 ```
 
+---
+
+## 📖 Especificação das Propriedades
+
 ### 1. `type` (String)
-Indica a categoria do autômato (ex.: `"AFD"`, `"AFN"`). Isso serve mais para categorização interna; o motor do simulador rodará a leitura não determinística e determinará o rastreamento automaticamente.
+Define a categoria teórica do autômato carregado.
+* **Valores comuns:** `"AFD"` (Autômato Finito Determinístico), `"AFN"` (Autômato Finito Não-Determinístico) ou `"AFNe"` (com transições vazias/Epsilon).
+* **Nota:** O simulador do Graphata é capaz de rodar e analisar o grafo dinamicamente; logo, este atributo serve primariamente para categorização e metadados, determinando como validações estritas (como as de determinismo) são aplicadas.
 
 ### 2. `states` (Lista de Objetos)
-Descreve os nós (estados) do seu grafo temporal.
-- **`name`** (String): O nome legível do estado, por padrão ex: `"q0"`, mas pode ser `S`, `A`, etc.
-- **`is_initial`** (Boolean): Define se o estado inicia a leitura (true ou false).
-- **`is_final`** (Boolean): Define se esse estado representa um passo de aceitação/condição de parada com sucesso.
+Define todos os estados existentes no autômato. Cada estado deve ser um objeto JSON contendo estritamente os atributos abaixo:
+* **`name`** *(String)*: Identificador único e legível do estado (ex.: `"q0"`, `"q1"`, `"S"`, `"A"`).
+* **`is_initial`** *(Boolean)*: Sinaliza se este é um estado inicial. Pelo menos um estado deve possuir este valor como `true`.
+* **`is_final`** *(Boolean)*: Sinaliza se este é um estado de aceitação (final).
 
 ### 3. `transitions` (Lista de Objetos)
-Descreve as arestas direcionadas e seus pesos lógicos.
-- **`source`** (String): Nome referenciado do estado origem. Deve constar na lista de states.
-- **`symbol`** (String): O Token consumido. Use string única tipo `"a"` ou `"1"`. Caso for uma transição vazia (Epsilon), use uma string vazia `""` ou `"ε"`.
-- **`target`** (String): O estado em que a máquina entrará após ler aquele símbolo a partir da fonte.
+Lista a função de transição do autômato na forma de um conjunto de arestas direcionadas.
+* **`source`** *(String)*: Nome exato do estado de origem (deve coincidir com o `name` de um estado definido na lista `states`).
+* **`symbol`** *(String)*: O símbolo do alfabeto que dispara a transição (ex.: `"a"`, `"0"`).
+  * **Transições Vazias (Épsilon / $\varepsilon$):** Representadas rigorosamente por uma string vazia `""` ou pelo caractere `"ε"`.
+* **`target`** *(String)*: Nome exato do estado de destino.
 
-## Comportamento de Interface Gráfica
-Ao fazer uso do recém implementado botão **Importar Autômato**, o canvas lerá os nós deste JSON e fará a disperão radial num círculo na interface. Transições serão mapeadas automaticamente e numeradas as arestas para sua correspondência visual.
+---
+
+## 🎨 Aspectos Visuais e Interface Gráfica
+
+Como o formato JSON do Graphata armazena **apenas o modelo lógico**, informações de posição visual (coordenadas XY dos nós e curvas das arestas) não são persistidas no arquivo.
+
+**Comportamento do Aplicativo:**
+1. Ao acionar a opção **Importar Autômato**, o motor lê e instancializa os estados.
+2. O sistema de layout (`utils/layout.py`) assume o controle visual, gerando de forma orgânica e automática as posições ideais (graças à sua disposição radial ou por forças de atração/repulsão).
+3. Transições com múltiplos símbolos entre os mesmos nós são agrupadas visualmente e auto-rotuladas na interface gráfica.

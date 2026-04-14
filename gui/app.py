@@ -9,6 +9,7 @@ from core.converter import Converter
 from core.minimizer import AutomatonMinimizer, StringGenerator
 from utils.serializer import AutomatonSerializer
 from utils.validator import AutomatonValidator
+from gui.table_editor import TransitionTableEditor
 
 SIDEBAR_W = 270
 BG_DARK   = "#0f172a"
@@ -157,7 +158,8 @@ class App(ctk.CTk):
         # ── Ferramentas ──
         section("Ferramentas")
         btn("✅ Validar Autômato",     self.validate_automaton,      "#14532d", "#166534")
-        btn("📊 Tabela de Transições", self.show_transition_table,   "#1e40af", "#1d4ed8")
+        btn("📊 Visualizar Tabela Original", self.show_transition_table,   "#1e40af", "#1d4ed8")
+        btn("✏️ Editar Tabela Δ",     self.open_table_editor,       "#b45309", "#92400e")
 
         sep()
 
@@ -398,6 +400,23 @@ class App(ctk.CTk):
                 ctk.CTkLabel(frame, text=cell, fg_color="#0f172a",
                              corner_radius=4, width=100
                              ).grid(row=r, column=c, padx=1, pady=1, sticky="ew")
+
+    def open_table_editor(self):
+        def _on_save(parsed_states, parsed_transitions):
+            self.canvas._snapshot()
+            self.automaton.clear()
+            
+            # Reconstruction
+            for st in parsed_states:
+                self.automaton.add_state(st["name"], is_initial=st["is_initial"], is_final=st["is_final"])
+            for t in parsed_transitions:
+                self.automaton.add_transition(t["source"], t["symbol"], t["target"])
+                
+            self.canvas.load_from_automaton()
+            self.canvas.organize_layout()
+            self._update_status()
+            
+        TransitionTableEditor(self, self.automaton, _on_save)
 
     # ──────────────────────────── Lote ────────────────────────────────────────
 

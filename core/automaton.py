@@ -30,12 +30,21 @@ class Automaton:
         
     def add_state(self, name: str, is_initial: bool = False, is_final: bool = False):
         if name not in self.states:
+            if is_initial:
+                self._clear_initial_states()
             self.states[name] = State(name, is_initial, is_final)
             
     def set_initial(self, name: str, is_initial: bool = True):
         seq = self.states.get(name)
         if seq:
+            if is_initial:
+                self._clear_initial_states()
             self.states[name] = State(seq.name, is_initial, seq.is_final)
+
+    def _clear_initial_states(self):
+        for state_name, state in list(self.states.items()):
+            if state.is_initial:
+                self.states[state_name] = State(state.name, False, state.is_final)
             
     def set_final(self, name: str, is_final: bool = True):
         seq = self.states.get(name)
