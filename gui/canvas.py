@@ -18,7 +18,7 @@ class AutomatonCanvas(tk.Canvas):
     HIGHLIGHT_VISITED = "#a3e635"
 
     def __init__(self, master, automaton: Automaton, on_change=None):
-        super().__init__(master, bg="#2b2b2b", highlightthickness=0)
+        super().__init__(master, bg="#2b2b2b", highlightthickness=0, takefocus=1)
         self.automaton = automaton
         self.on_change = on_change  # callback chamado quando o autômato muda
 
@@ -67,6 +67,7 @@ class AutomatonCanvas(tk.Canvas):
         self.bind("<Button-5>",           self.on_zoom)       # Linux scroll down
         # Delete para remover aresta/estado selecionado
         self.bind("<Delete>",             self.on_delete_key)
+        self.bind("<BackSpace>",          self.on_delete_key)
         self.bind("<Control-z>",          self.undo)
 
     # ─── Histórico ──────────────────────────────────────────────────────────
@@ -345,6 +346,7 @@ class AutomatonCanvas(tk.Canvas):
     # ─── Cliques ────────────────────────────────────────────────────────────
 
     def on_right_click(self, event):
+        self.focus_set()
         item = self.find_withtag("current")
         if item:
             tags = self.gettags(item[0])
@@ -414,6 +416,7 @@ class AutomatonCanvas(tk.Canvas):
 
     def _select_edge_at(self, x, y):
         """Identifica a transição mais próxima do clique e a seleciona."""
+        self.focus_set()
         current_pair = self._edge_pair_from_current_item()
         if current_pair:
             for t in self.automaton.transitions:
@@ -451,16 +454,17 @@ class AutomatonCanvas(tk.Canvas):
             self.selected_edge = None
             self.refresh_edges()
             self._notify()
+            return "break"
 
     # ─── Pressionar / Arrastar ──────────────────────────────────────────────
 
     def on_press(self, event):
-        # Limpa seleção de aresta
-        self.selected_edge = None
         item = self.find_withtag("current")
         if item:
             tags = self.gettags(item[0])
             if "node" in tags or "node_text" in tags:
+                # Limpa seleção de aresta ao clicar num nó
+                self.selected_edge = None
                 name = tags[1]
                 if event.state & 0x0001:  # Shift
                     self.link_start = name
@@ -473,6 +477,7 @@ class AutomatonCanvas(tk.Canvas):
                 self.on_edge_drag_start(event)
         else:
             # Inicia pan com botão esquerdo se clicar no vazio
+            self.selected_edge = None
             self.on_pan_start(event)
 
     def on_drag(self, event):
@@ -511,10 +516,21 @@ class AutomatonCanvas(tk.Canvas):
                     target_name = tags[1]
                     sym = sd.askstring("Transição", f"Símbolo ({self.link_start} → {target_name}):")
                     if sym is not None:
-                        self._snapshot()
-                        self.automaton.add_transition(self.link_start, sym, target_name)
-                        self.refresh_edges()
-                        self._notify()
+                        # Verificar se já existe transição idêntica
+                        existing = any(
+                            t.source == self.link_start and t.symbol == sym and t.target == target_name
+                            for t in self.automaton.transitions
+                        )
+                        if existing:
+                            mb.showwarning(
+                                "Transição Duplicada",
+                                f"Já existe uma transição '{sym}' de '{self.link_start}' para '{target_name}'.",
+                            )
+                        else:
+                            self._snapshot()
+                            self.automaton.add_transition(self.link_start, sym, target_name)
+                            self.refresh_edges()
+                            self._notify()
             self.link_start = None
         self.drag_data["item"] = None
         self.pan_data["active"] = False

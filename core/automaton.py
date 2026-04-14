@@ -51,10 +51,11 @@ class Automaton:
     def add_transition(self, source: str, symbol: str, target: str):
         if source in self.states and target in self.states:
             t = Transition(source, symbol, target)
+            # Impedir transições duplicadas (mesmo source, symbol, target)
             if t not in self.transitions:
                 self.transitions.append(t)
-            if symbol not in ("", "ε"):
-                self.alphabet.add(symbol)
+                if symbol not in ("", "ε"):
+                    self.alphabet.add(symbol)
                 
     def get_initial_states(self) -> List[State]:
         return [s for s in self.states.values() if s.is_initial]
